@@ -30,34 +30,26 @@ impl From<AllocError> for VectorError {
     }
 }
 
-pub struct Vector<T, A: Allocator = Global> {
+pub struct Vector<T> {
     buffer: NonNull<T>,
     capacity: usize,
     length: usize,
-    allocator: A,
+    allocator: Global,
     _marker: PhantomData<T>,
 }
 
-impl<T> Vector<T, Global> {
+impl<T> Vector<T> {
     pub fn new() -> Self {
-        Self::new_in(Global)
-    }
-    pub fn with_capacity(capacity: usize) -> Result<Self, VectorError> {
-        Self::with_capacity_in(capacity, Global)
-    }
-}
-
-impl<T, A: Allocator> Vector<T, A> {
-    pub fn new_in(allocator: A) -> Self {
         Self {
             buffer: NonNull::dangling(),
             capacity: 0,
             length: 0,
-            allocator,
+            allocator: Global,
             _marker: PhantomData,
         }
     }
-    pub fn with_capacity_in(capacity: usize, allocator: A) -> Result<Self, VectorError> {
+    pub fn with_capacity(capacity: usize) -> Result<Self, VectorError> {
+        let allocator = Global;
         let layout = Layout::array::<T>(capacity)?;
         let buffer = if layout.size() > 0 {
             allocator.allocate(layout)?.cast()
@@ -126,20 +118,20 @@ impl<T, A: Allocator> Vector<T, A> {
     }
 }
 
-impl<T, A: Allocator> Deref for Vector<T, A> {
+impl<T> Deref for Vector<T> {
     type Target = [T];
     fn deref(&self) -> &Self::Target {
         unsafe { std::slice::from_raw_parts(self.buffer.as_ptr(), self.length) }
     }
 }
 
-impl<T, A: Allocator> DerefMut for Vector<T, A> {
+impl<T> DerefMut for Vector<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { std::slice::from_raw_parts_mut(self.buffer.as_ptr(), self.length) }
     }
 }
 
-impl<T, A: Allocator> Drop for Vector<T, A> {
+impl<T> Drop for Vector<T> {
     fn drop(&mut self) {
         while let Some(_) = self.pop() {}
         if self.capacity > 0 {
@@ -151,9 +143,9 @@ impl<T, A: Allocator> Drop for Vector<T, A> {
     }
 }
 
-impl<T: Clone, A: Allocator + Clone> Clone for Vector<T, A> {
+impl<T: Clone> Clone for Vector<T> {
     fn clone(&self) -> Self {
-        let mut new_vector = Self::with_capacity_in(self.length, self.allocator.clone()).unwrap();
+        let mut new_vector = Self::with_capacity(self.length).unwrap();
         for item in self.iter() {
             new_vector.push(item.clone()).unwrap();
         }
@@ -161,12 +153,12 @@ impl<T: Clone, A: Allocator + Clone> Clone for Vector<T, A> {
     }
 }
 
-impl<T: PartialEq, A: Allocator> PartialEq for Vector<T, A> {
+impl<T: PartialEq> PartialEq for Vector<T> {
     fn eq(&self, other: &Self) -> bool {
         self.deref() == other.deref()
     }
 }
-impl<T: Eq, A: Allocator> Eq for Vector<T, A> {}
+impl<T: Eq> Eq for Vector<T> {}
 
 #[cfg(test)]
 mod tests {
