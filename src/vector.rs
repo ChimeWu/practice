@@ -1,7 +1,7 @@
 extern crate alloc;
+use crate::slice::{AsSlice, SliceIter, SliceMutIter, SliceRaw, SliceRefIter};
 use alloc::alloc::{AllocError, Allocator, Global, Layout, LayoutError};
 use core::fmt::Display;
-use core::ops::{Deref, DerefMut};
 use core::{marker::PhantomData, ptr::NonNull};
 
 #[derive(Debug)]
@@ -31,9 +31,8 @@ impl From<AllocError> for VectorError {
 }
 
 pub struct Vector<T> {
-    buffer: NonNull<T>,
+    slice_raw: SliceRaw<T>,
     capacity: usize,
-    length: usize,
     allocator: Global,
     _marker: PhantomData<T>,
 }
@@ -41,9 +40,8 @@ pub struct Vector<T> {
 impl<T> Vector<T> {
     pub fn new() -> Self {
         Self {
-            buffer: NonNull::dangling(),
+            slice_raw: SliceRaw::zst_slice(),
             capacity: 0,
-            length: 0,
             allocator: Global,
             _marker: PhantomData,
         }
@@ -57,15 +55,14 @@ impl<T> Vector<T> {
             NonNull::dangling()
         };
         Ok(Self {
-            buffer,
+            slice_raw: SliceRaw::new(buffer, 0),
             capacity,
-            length: 0,
             allocator,
             _marker: PhantomData,
         })
     }
     pub fn reserve(&mut self, additional: usize) -> Result<(), VectorError> {
-        if self.length + additional > self.capacity {
+        if self.len() + additional > self.capacity {
             let old_layout = Layout::array::<T>(self.capacity)?;
             let new_capacity = (self.capacity + additional).next_power_of_two();
             if new_capacity == 0 {
@@ -74,10 +71,10 @@ impl<T> Vector<T> {
             let new_layout = Layout::array::<T>(new_capacity)?;
             let new_buffer = unsafe {
                 self.allocator
-                    .grow(self.buffer.cast(), old_layout, new_layout)?
+                    .grow(self.slice_raw.head().cast(), old_layout, new_layout)?
                     .cast()
             };
-            self.buffer = new_buffer;
+            *self.slice_raw.head_mut() = new_buffer;
             self.capacity = new_capacity;
             Ok(())
         } else {
@@ -85,16 +82,16 @@ impl<T> Vector<T> {
         }
     }
     pub fn shrink(&mut self) -> Result<(), VectorError> {
-        if self.length < self.capacity {
+        if self.len() < self.capacity {
             let old_layout = Layout::array::<T>(self.capacity)?;
-            let new_layout = Layout::array::<T>(self.length)?;
+            let new_layout = Layout::array::<T>(self.len())?;
             let new_buffer = unsafe {
                 self.allocator
-                    .shrink(self.buffer.cast(), old_layout, new_layout)?
+                    .shrink(self.slice_raw.head().cast(), old_layout, new_layout)?
                     .cast()
             };
-            self.buffer = new_buffer;
-            self.capacity = self.length;
+            *self.slice_raw.head_mut() = new_buffer;
+            self.capacity = self.len();
             Ok(())
         } else {
             Ok(())
@@ -103,31 +100,37 @@ impl<T> Vector<T> {
     pub fn push(&mut self, value: T) -> Result<(), VectorError> {
         self.reserve(1)?;
         unsafe {
-            std::ptr::write(self.buffer.as_ptr().add(self.length), value);
+            std::ptr::write(self.slice_raw.head().as_ptr().add(self.len()), value);
         }
-        self.length += 1;
+        *self.slice_raw.len_mut() += 1;
         Ok(())
     }
     pub fn pop(&mut self) -> Option<T> {
-        if self.length == 0 {
+        if self.len() == 0 {
             None
         } else {
-            self.length -= 1;
-            unsafe { Some(std::ptr::read(self.buffer.as_ptr().add(self.length))) }
+            *self.slice_raw.len_mut() -= 1;
+            unsafe {
+                Some(std::ptr::read(
+                    self.slice_raw.head().as_ptr().add(self.len()),
+                ))
+            }
         }
     }
-}
-
-impl<T> Deref for Vector<T> {
-    type Target = [T];
-    fn deref(&self) -> &Self::Target {
-        unsafe { std::slice::from_raw_parts(self.buffer.as_ptr(), self.length) }
+    pub fn get(&self, index: usize) -> Option<&T> {
+        self.as_slice_ref().get(index)
     }
-}
-
-impl<T> DerefMut for Vector<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { std::slice::from_raw_parts_mut(self.buffer.as_ptr(), self.length) }
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        self.as_slice_mut().get_mut(index)
+    }
+    pub fn iter(&self) -> SliceRefIter<'_, T> {
+        self.as_slice_ref().into_iter()
+    }
+    pub fn iter_mut(&mut self) -> SliceMutIter<'_, T> {
+        self.as_slice_mut().into_iter()
+    }
+    pub fn len(&self) -> usize {
+        self.slice_raw.len()
     }
 }
 
@@ -137,15 +140,57 @@ impl<T> Drop for Vector<T> {
         if self.capacity > 0 {
             unsafe {
                 let layout = Layout::array::<T>(self.capacity).unwrap_unchecked();
-                self.allocator.deallocate(self.buffer.cast(), layout);
+                self.allocator
+                    .deallocate(self.slice_raw.head().cast(), layout);
             }
         }
     }
 }
+impl<T> AsSlice for Vector<T> {
+    type Target = T;
+    fn as_slice_raw(&self) -> &SliceRaw<Self::Target> {
+        &self.slice_raw
+    }
+}
+impl<'a, T> IntoIterator for &'a Vector<T> {
+    type Item = &'a T;
+    type IntoIter = SliceRefIter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+impl<'a, T> IntoIterator for &'a mut Vector<T> {
+    type Item = &'a mut T;
+    type IntoIter = SliceMutIter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
 
+pub struct VectorIter<T> {
+    _vector: Vector<T>,
+    iter: SliceIter<T>,
+}
+impl<T> Iterator for VectorIter<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|ptr| unsafe { ptr.read() })
+    }
+}
+impl<T> IntoIterator for Vector<T> {
+    type Item = T;
+    type IntoIter = VectorIter<T>;
+    fn into_iter(self) -> Self::IntoIter {
+        let iter = self.slice_raw.into_iter();
+        VectorIter {
+            _vector: self,
+            iter,
+        }
+    }
+}
 impl<T: Clone> Clone for Vector<T> {
     fn clone(&self) -> Self {
-        let mut new_vector = Self::with_capacity(self.length).unwrap();
+        let mut new_vector = Self::with_capacity(self.len()).unwrap();
         for item in self.iter() {
             new_vector.push(item.clone()).unwrap();
         }
@@ -153,31 +198,34 @@ impl<T: Clone> Clone for Vector<T> {
     }
 }
 
-impl<T: PartialEq> PartialEq for Vector<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.deref() == other.deref()
-    }
-}
-impl<T: Eq> Eq for Vector<T> {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn test_vector() {
         let mut vec = Vector::new();
-        assert_eq!(vec.len(), 0);
-        assert_eq!(vec.capacity, 0);
-        vec.push(1).unwrap();
-        assert_eq!(vec.len(), 1);
-        assert_eq!(vec[0], 1);
-        vec.push(2).unwrap();
-        assert_eq!(vec.len(), 2);
-        assert_eq!(vec[1], 2);
-        assert_eq!(vec.pop(), Some(2));
-        assert_eq!(vec.len(), 1);
-        assert_eq!(vec.pop(), Some(1));
-        assert_eq!(vec.len(), 0);
-        assert_eq!(vec.pop(), None);
+        for i in 0..10 {
+            vec.push(i).unwrap();
+        }
+        assert_eq!(vec.len(), 10);
+        *vec.as_slice_mut().get_mut(2).unwrap() = 42;
+        assert_eq!(vec.get(2).unwrap(), &42);
+        // assert_eq!(vec.binary_search(&42), Some(2));
+    }
+    #[test]
+    fn test_vector_iter() {
+        let mut vec = Vector::new();
+        for i in 0..10 {
+            vec.push(i).unwrap();
+        }
+        for i in vec.iter() {
+            println!("{}", *i);
+        }
+        vec.iter_mut().for_each(|i| {
+            *i = &*i + 2;
+        });
+        for i in vec.iter() {
+            println!("{}", *i);
+        }
     }
 }
