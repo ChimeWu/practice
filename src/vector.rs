@@ -1,5 +1,7 @@
 extern crate alloc;
-use crate::slice::{AsSlice, SliceIter, SliceMutIter, SliceRaw, SliceRefIter};
+use crate::slice::{
+    AsSlice, SliceIter, SliceMutExt, SliceMutIter, SlicePtr, SliceRefExt, SliceRefIter,
+};
 use alloc::alloc::{AllocError, Allocator, Global, Layout, LayoutError};
 use core::fmt::Display;
 use core::{marker::PhantomData, ptr::NonNull};
@@ -31,7 +33,7 @@ impl From<AllocError> for VectorError {
 }
 
 pub struct Vector<T> {
-    slice_raw: SliceRaw<T>,
+    slice_raw: SlicePtr<T>,
     capacity: usize,
     allocator: Global,
     _marker: PhantomData<T>,
@@ -40,7 +42,7 @@ pub struct Vector<T> {
 impl<T> Vector<T> {
     pub fn new() -> Self {
         Self {
-            slice_raw: SliceRaw::zst_slice(),
+            slice_raw: SlicePtr::zst_slice(),
             capacity: 0,
             allocator: Global,
             _marker: PhantomData,
@@ -55,7 +57,7 @@ impl<T> Vector<T> {
             NonNull::dangling()
         };
         Ok(Self {
-            slice_raw: SliceRaw::new(buffer, 0),
+            slice_raw: unsafe { SlicePtr::new(buffer, 0) },
             capacity,
             allocator,
             _marker: PhantomData,
@@ -117,21 +119,6 @@ impl<T> Vector<T> {
             }
         }
     }
-    pub fn get(&self, index: usize) -> Option<&T> {
-        self.as_slice_ref().get(index)
-    }
-    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        self.as_slice_mut().get_mut(index)
-    }
-    pub fn iter(&self) -> SliceRefIter<'_, T> {
-        self.as_slice_ref().into_iter()
-    }
-    pub fn iter_mut(&mut self) -> SliceMutIter<'_, T> {
-        self.as_slice_mut().into_iter()
-    }
-    pub fn len(&self) -> usize {
-        self.slice_raw.len()
-    }
 }
 
 impl<T> Drop for Vector<T> {
@@ -146,12 +133,13 @@ impl<T> Drop for Vector<T> {
         }
     }
 }
-impl<T> AsSlice for Vector<T> {
-    type Target = T;
-    fn as_slice_raw(&self) -> &SliceRaw<Self::Target> {
-        &self.slice_raw
+impl<T> AsSlice<T> for Vector<T> {
+    unsafe fn slice_ptr(&self) -> SlicePtr<T> {
+        self.slice_raw
     }
 }
+impl<T> SliceRefExt<T> for Vector<T> {}
+impl<T> SliceMutExt<T> for Vector<T> {}
 impl<'a, T> IntoIterator for &'a Vector<T> {
     type Item = &'a T;
     type IntoIter = SliceRefIter<'a, T>;
@@ -202,13 +190,13 @@ impl<T: Clone> Clone for Vector<T> {
 mod tests {
     use super::*;
     #[test]
-    fn test_vector() {
+    fn test_vector_push() {
         let mut vec = Vector::new();
         for i in 0..10 {
             vec.push(i).unwrap();
         }
         assert_eq!(vec.len(), 10);
-        *vec.as_slice_mut().get_mut(2).unwrap() = 42;
+        *vec.get_mut(2).unwrap() = 42;
         assert_eq!(vec.get(2).unwrap(), &42);
         // assert_eq!(vec.binary_search(&42), Some(2));
     }
@@ -228,4 +216,61 @@ mod tests {
             println!("{}", *i);
         }
     }
+    #[test]
+    fn test_vector_reverse() {
+        let mut vec = Vector::new();
+        for i in 0..10 {
+            vec.push(i).unwrap();
+        }
+        vec.reverse();
+        for i in vec.iter() {
+            println!("{}", *i);
+        }
+        for i in vec.iter().rev() {
+            println!("{}", *i);
+        }
+    }
+    #[test]
+    fn test_vector_ref_and_mut() {
+        let mut vec = Vector::new();
+        for i in 0..10 {
+            vec.push(i).unwrap();
+        }
+        let mut vec_mut = vec.slice_mut();
+        let vec_mut2 = vec_mut.range_mut(2..5);
+        vec_mut.iter_mut().for_each(|i| {
+            *i = *i + 2;
+        });
+        vec_mut2.iter_mut().for_each(|i| {
+            *i = *i + 3;
+        });
+        let mut vec2 = (0..10).collect::<Vec<usize>>();
+        let vec2_mut = vec2.as_mut_slice();
+        let vec2_mut2 = &mut vec2_mut[2..5];
+        vec2_mut.iter_mut().for_each(|i| {
+            *i = *i + 2;
+        });
+        vec2_mut2.iter_mut().for_each(|i| {
+            *i = *i + 3;
+        });
+    }
+    // #[test]
+    // fn test_vector_sort() {
+    //     let mut vec = Vector::new();
+    //     vec.push(3).unwrap();
+    //     vec.push(1).unwrap();
+    //     vec.push(4).unwrap();
+    //     vec.push(1).unwrap();
+    //     vec.push(5).unwrap();
+    //     vec.push(9).unwrap();
+    //     vec.push(2).unwrap();
+    //     vec.push(6).unwrap();
+    //     vec.push(5).unwrap();
+    //     vec.push(3).unwrap();
+    //     vec.push(5).unwrap();
+    //     vec.sort();
+    //     for i in vec.iter() {
+    //         println!("{}", *i);
+    //     }
+    // }
 }
