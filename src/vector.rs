@@ -145,6 +145,28 @@ impl<T> Vector<T> {
     pub fn as_slice_mut(&mut self) -> &mut [T] {
         unsafe { core::slice::from_raw_parts_mut(self.buffer.as_ptr(), self.len) }
     }
+    pub fn reverse(&mut self) {
+        let raw = RawVecPtrRange::from(&*self);
+        raw.reverse();
+    }
+    pub fn swap(&mut self, i: usize, j: usize) {
+        let raw = RawVecPtrRange::from(&*self);
+        raw.swap(i, j);
+    }
+    pub fn sort_by<F: Fn(&T, &T) -> core::cmp::Ordering + Copy>(&mut self, f: F) {
+        let raw = RawVecPtrRange::from(&*self);
+        raw.quick_sort_by(f);
+    }
+    pub fn sort_by_key<U: Ord, F: Fn(&T) -> &U>(&mut self, f: F) {
+        let cmp_f = |t1: &T, t2: &T| f(t1).cmp(f(t2));
+        self.sort_by(cmp_f);
+    }
+}
+
+impl<T: Ord> Vector<T> {
+    pub fn sort(&mut self) {
+        self.sort_by(Ord::cmp);
+    }
 }
 
 impl<T> Drop for Vector<T> {
@@ -161,7 +183,7 @@ impl<T> Drop for Vector<T> {
 
 pub struct VectorIter<T> {
     _vector: Vector<T>,
-    iter: VecIterInner<T>,
+    iter: RawVecPtrRange<T>,
 }
 impl<T> Iterator for VectorIter<T> {
     type Item = T;
@@ -184,7 +206,7 @@ impl<T> IntoIterator for Vector<T> {
     type IntoIter = VectorIter<T>;
     fn into_iter(self) -> Self::IntoIter {
         VectorIter {
-            iter: VecIterInner::from(&self),
+            iter: RawVecPtrRange::from(&self),
             _vector: self,
         }
     }
@@ -199,12 +221,12 @@ impl<T: Clone> Clone for Vector<T> {
     }
 }
 
-#[derive(Debug, Clone)]
-struct VecIterInner<T> {
+#[derive(Debug)]
+struct RawVecPtrRange<T> {
     head: NonNull<T>,
     tail: NonNull<T>,
 }
-impl<T> VecIterInner<T> {
+impl<T> RawVecPtrRange<T> {
     unsafe fn range(self, range: Range<usize>) -> Self {
         unsafe {
             Self {
@@ -213,8 +235,73 @@ impl<T> VecIterInner<T> {
             }
         }
     }
+    unsafe fn split(self, index: usize) -> (Self, Self) {
+        let split_at = unsafe { self.head.add(index) };
+        (
+            Self {
+                head: self.head,
+                tail: split_at,
+            },
+            Self {
+                head: split_at,
+                tail: self.tail,
+            },
+        )
+    }
+    pub fn len(self) -> usize {
+        unsafe { self.tail.offset_from(self.head).unsigned_abs() }
+    }
+    pub fn swap(self, i: usize, j: usize) {
+        let len = self.len();
+        if i >= len || j >= len {
+            panic!("index out of range")
+        }
+        if i == j {
+            return;
+        }
+        unsafe {
+            core::ptr::swap(self.head.add(i).as_ptr(), self.head.add(j).as_ptr());
+        }
+    }
+    pub fn reverse(mut self) {
+        while self.head < self.tail {
+            unsafe {
+                core::ptr::swap(self.head.as_ptr(), self.tail.sub(1).as_ptr());
+                self.head = self.head.add(1);
+                self.tail = self.tail.sub(1);
+            }
+        }
+    }
+    pub fn quick_sort_by<F: Fn(&T, &T) -> core::cmp::Ordering + Copy>(self, f: F) {
+        let len = self.len();
+        if len <= 1 {
+            return;
+        }
+        let pivot_index = len - 1;
+        let pivot = &self[pivot_index];
+        let mut i = 0;
+        for j in 0..pivot_index {
+            if f(&self[j], pivot) == core::cmp::Ordering::Less {
+                self.swap(i, j);
+                i += 1;
+            }
+        }
+        self.swap(i, pivot_index);
+        let (left, right) = unsafe { self.split(i) };
+        left.quick_sort_by(f);
+        right.quick_sort_by(f);
+    }
 }
-impl<T> Iterator for VecIterInner<T> {
+impl<T> Clone for RawVecPtrRange<T> {
+    fn clone(&self) -> Self {
+        Self {
+            head: self.head,
+            tail: self.tail,
+        }
+    }
+}
+impl<T> Copy for RawVecPtrRange<T> {}
+impl<T> Iterator for RawVecPtrRange<T> {
     type Item = NonNull<T>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.head < self.tail {
@@ -226,7 +313,7 @@ impl<T> Iterator for VecIterInner<T> {
         }
     }
 }
-impl<T> DoubleEndedIterator for VecIterInner<T> {
+impl<T> DoubleEndedIterator for RawVecPtrRange<T> {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.tail = unsafe { self.tail.sub(1) };
         if self.tail >= self.head {
@@ -236,38 +323,61 @@ impl<T> DoubleEndedIterator for VecIterInner<T> {
         }
     }
 }
-impl<T> ExactSizeIterator for VecIterInner<T> {
+impl<T> ExactSizeIterator for RawVecPtrRange<T> {
     fn len(&self) -> usize {
         unsafe { self.tail.offset_from(self.head) }.abs() as usize
     }
 }
-impl<T> From<&Vector<T>> for VecIterInner<T> {
+impl<T> From<&Vector<T>> for RawVecPtrRange<T> {
     fn from(value: &Vector<T>) -> Self {
-        VecIterInner {
+        RawVecPtrRange {
             head: value.buffer,
             tail: unsafe { value.buffer.add(value.len) },
         }
     }
 }
-impl<T> From<VecIterInner<T>> for Range<*const T> {
-    fn from(value: VecIterInner<T>) -> Self {
+impl<T> From<RawVecPtrRange<T>> for Range<*const T> {
+    fn from(value: RawVecPtrRange<T>) -> Self {
         Range {
             start: value.head.as_ptr().cast_const(),
             end: value.tail.as_ptr().cast_const(),
         }
     }
 }
-impl<T> From<VecIterInner<T>> for Range<*mut T> {
-    fn from(value: VecIterInner<T>) -> Self {
+impl<T> From<RawVecPtrRange<T>> for Range<*mut T> {
+    fn from(value: RawVecPtrRange<T>) -> Self {
         Range {
             start: value.head.as_ptr(),
             end: value.tail.as_ptr(),
         }
     }
 }
+impl<T> Index<usize> for RawVecPtrRange<T> {
+    type Output = T;
+    fn index(&self, index: usize) -> &Self::Output {
+        unsafe {
+            let ptr = self.head.add(index);
+            if ptr >= self.tail {
+                panic!("index out of bound");
+            }
+            ptr.as_ref()
+        }
+    }
+}
+impl<T> IndexMut<usize> for RawVecPtrRange<T> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        unsafe {
+            let mut ptr = self.head.add(index);
+            if ptr >= self.tail {
+                panic!("index out of bound");
+            }
+            ptr.as_mut()
+        }
+    }
+}
 
 pub struct VecRefIter<'a, T> {
-    iter: VecIterInner<T>,
+    iter: RawVecPtrRange<T>,
     _marker: PhantomData<&'a T>,
 }
 impl<'a, T> Iterator for VecRefIter<'a, T> {
@@ -286,8 +396,8 @@ impl<'a, T> ExactSizeIterator for VecRefIter<'a, T> {
         self.iter.len()
     }
 }
-impl<'a, T> From<VecIterInner<T>> for VecRefIter<'a, T> {
-    fn from(iter: VecIterInner<T>) -> Self {
+impl<'a, T> From<RawVecPtrRange<T>> for VecRefIter<'a, T> {
+    fn from(iter: RawVecPtrRange<T>) -> Self {
         Self {
             iter,
             _marker: PhantomData,
@@ -298,12 +408,12 @@ impl<'a, T> IntoIterator for &'a Vector<T> {
     type IntoIter = VecRefIter<'a, T>;
     type Item = &'a T;
     fn into_iter(self) -> Self::IntoIter {
-        VecRefIter::from(VecIterInner::from(self))
+        VecRefIter::from(RawVecPtrRange::from(self))
     }
 }
 
 pub struct VecMutIter<'a, T> {
-    iter: VecIterInner<T>,
+    iter: RawVecPtrRange<T>,
     _marker: PhantomData<&'a mut T>,
 }
 impl<'a, T> Iterator for VecMutIter<'a, T> {
@@ -322,8 +432,8 @@ impl<'a, T> ExactSizeIterator for VecMutIter<'a, T> {
         self.iter.len()
     }
 }
-impl<'a, T> From<VecIterInner<T>> for VecMutIter<'a, T> {
-    fn from(iter: VecIterInner<T>) -> Self {
+impl<'a, T> From<RawVecPtrRange<T>> for VecMutIter<'a, T> {
+    fn from(iter: RawVecPtrRange<T>) -> Self {
         Self {
             iter,
             _marker: PhantomData,
@@ -334,7 +444,7 @@ impl<'a, T> IntoIterator for &'a mut Vector<T> {
     type Item = &'a mut T;
     type IntoIter = VecMutIter<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
-        VecMutIter::from(VecIterInner::from(&*self))
+        VecMutIter::from(RawVecPtrRange::from(&*self))
     }
 }
 
@@ -355,7 +465,7 @@ impl<T> Index<Range<usize>> for Vector<T> {
         if index.start >= self.len || index.end > self.len {
             panic!("index out of bound!");
         }
-        let iter = VecIterInner::from(self);
+        let iter = RawVecPtrRange::from(self);
         unsafe {
             let iter = iter.range(index);
             core::slice::from_ptr_range(iter.into())
@@ -367,7 +477,7 @@ impl<T> IndexMut<Range<usize>> for Vector<T> {
         if index.start >= self.len || index.end > self.len {
             panic!("index out of bound!");
         }
-        let iter = VecIterInner::from(&*self);
+        let iter = RawVecPtrRange::from(&*self);
         unsafe {
             let iter = iter.range(index);
             core::slice::from_mut_ptr_range(iter.into())
@@ -386,6 +496,26 @@ impl<T> IndexMut<RangeFull> for Vector<T> {
         let _ = index;
         self.as_slice_mut()
     }
+}
+
+macro_rules! vector {
+    () => {
+        Vector::new()
+    };
+    ($elem:expr;$n:expr) =>{{
+        let mut v = Vector::new();
+        for i in 0..$n {
+            v.push($elem).unwrap();
+        }
+        v
+    }};
+    ($($elem:expr),+ $(,)?) => {{
+        let mut v = Vector::new();
+        $(
+            v.push($elem).unwrap();
+        )+
+        v
+    }};
 }
 
 #[cfg(test)]
@@ -416,6 +546,33 @@ mod tests {
         });
         for i in vec.iter() {
             println!("{}", *i);
+        }
+    }
+    #[test]
+    fn test_vector_reverse() {
+        let mut vec = Vector::new();
+        for i in 0..10 {
+            vec.push(i).unwrap();
+        }
+        vec.reverse();
+        for i in vec.into_iter() {
+            println!("{}", i);
+        }
+        let mut vec = Vector::new();
+        for i in 0..9 {
+            vec.push(i).unwrap();
+        }
+        vec.reverse();
+        for i in vec.into_iter() {
+            println!("{}", i);
+        }
+    }
+    #[test]
+    fn test_vector_sort() {
+        let mut vec = vector![3, 5, 8, 1, 2, 7, 4, 6];
+        vec.sort();
+        for i in vec {
+            println!("{}", i);
         }
     }
 }
