@@ -2,7 +2,7 @@ extern crate alloc;
 use alloc::alloc::{AllocError, Allocator, Global, Layout, LayoutError};
 use core::fmt::Display;
 use core::{marker::PhantomData, ptr::NonNull};
-use std::ops::{Index, IndexMut};
+use std::ops::{Index, IndexMut, Range, RangeFull};
 
 #[derive(Debug)]
 pub enum VectorError {
@@ -139,6 +139,12 @@ impl<T> Vector<T> {
     pub fn iter_mut(&mut self) -> VecMutIter<'_, T> {
         self.into_iter()
     }
+    pub fn as_slice(&self) -> &[T] {
+        unsafe { core::slice::from_raw_parts(self.buffer.as_ptr().cast_const(), self.len) }
+    }
+    pub fn as_slice_mut(&mut self) -> &mut [T] {
+        unsafe { core::slice::from_raw_parts_mut(self.buffer.as_ptr(), self.len) }
+    }
 }
 
 impl<T> Drop for Vector<T> {
@@ -194,9 +200,19 @@ impl<T: Clone> Clone for Vector<T> {
 }
 
 #[derive(Debug, Clone)]
-pub struct VecIterInner<T> {
+struct VecIterInner<T> {
     head: NonNull<T>,
     tail: NonNull<T>,
+}
+impl<T> VecIterInner<T> {
+    unsafe fn range(self, range: Range<usize>) -> Self {
+        unsafe {
+            Self {
+                head: self.head.add(range.start),
+                tail: self.tail.add(range.end),
+            }
+        }
+    }
 }
 impl<T> Iterator for VecIterInner<T> {
     type Item = NonNull<T>;
@@ -230,6 +246,22 @@ impl<T> From<&Vector<T>> for VecIterInner<T> {
         VecIterInner {
             head: value.buffer,
             tail: unsafe { value.buffer.add(value.len) },
+        }
+    }
+}
+impl<T> From<VecIterInner<T>> for Range<*const T> {
+    fn from(value: VecIterInner<T>) -> Self {
+        Range {
+            start: value.head.as_ptr().cast_const(),
+            end: value.tail.as_ptr().cast_const(),
+        }
+    }
+}
+impl<T> From<VecIterInner<T>> for Range<*mut T> {
+    fn from(value: VecIterInner<T>) -> Self {
+        Range {
+            start: value.head.as_ptr(),
+            end: value.tail.as_ptr(),
         }
     }
 }
@@ -315,6 +347,44 @@ impl<T> Index<usize> for Vector<T> {
 impl<T> IndexMut<usize> for Vector<T> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         self.get_mut(index).expect("out bound of index")
+    }
+}
+impl<T> Index<Range<usize>> for Vector<T> {
+    type Output = [T];
+    fn index(&self, index: Range<usize>) -> &[T] {
+        if index.start >= self.len || index.end > self.len {
+            panic!("index out of bound!");
+        }
+        let iter = VecIterInner::from(self);
+        unsafe {
+            let iter = iter.range(index);
+            core::slice::from_ptr_range(iter.into())
+        }
+    }
+}
+impl<T> IndexMut<Range<usize>> for Vector<T> {
+    fn index_mut(&mut self, index: Range<usize>) -> &mut Self::Output {
+        if index.start >= self.len || index.end > self.len {
+            panic!("index out of bound!");
+        }
+        let iter = VecIterInner::from(&*self);
+        unsafe {
+            let iter = iter.range(index);
+            core::slice::from_mut_ptr_range(iter.into())
+        }
+    }
+}
+impl<T> Index<RangeFull> for Vector<T> {
+    type Output = [T];
+    fn index(&self, index: RangeFull) -> &Self::Output {
+        let _ = index;
+        self.as_slice()
+    }
+}
+impl<T> IndexMut<RangeFull> for Vector<T> {
+    fn index_mut(&mut self, index: RangeFull) -> &mut Self::Output {
+        let _ = index;
+        self.as_slice_mut()
     }
 }
 
